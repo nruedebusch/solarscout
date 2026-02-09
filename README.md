@@ -2,7 +2,7 @@
 
 **Automated Solar Farm Site Assessment Tool**
 
-SolarScout is a geospatial analysis application that identifies and evaluates potential solar farm locations using OpenStreetMap data. The tool combines land-use analysis, exclusion zone filtering, and grid infrastructure proximity scoring to generate a ranked list of suitable sites.
+SolarScout is a geospatial analysis application that identifies and evaluates potential solar farm locations using OpenStreetMap data. The tool combines land-use analysis, exclusion zone filtering, and grid infrastructure proximity scoring to generate a list of suitable sites.
 
 ## Technology Stack
 
