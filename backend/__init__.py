@@ -1,0 +1,1 @@
+# SolarScout backend package

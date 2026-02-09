@@ -1,0 +1,36 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_DB: solarscout
+      POSTGRES_USER: solarscout
+      POSTGRES_PASSWORD: solarscout
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+      - ./prepare_data.sql:/sql/prepare_data.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Ephemeral helper container (not started by default)
+  importer:
+    image: iboates/osm2pgsql:latest
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: solarscout
+    volumes:
+      - ./:/data:ro
+    entrypoint: ["osm2pgsql"]
+    profiles: ["import"]
+
+volumes:
+  postgres_data:
