@@ -130,7 +130,7 @@ onBeforeUnmount(() => {
                 </h1>
                 <p class="mt-1 text-sm text-slate-600">
                   Geospatial web application that analyzes OpenStreetMap data to
-                  identify optimal solar farm locations.
+                  identify optimal solar farm locations in the state of Bremen.
                 </p>
               </div>
               <button
@@ -297,6 +297,24 @@ onBeforeUnmount(() => {
               </p>
             </div>
           </section>
+
+          <footer
+            class="border-t border-slate-200 bg-slate-50 px-6 py-4 sm:px-7"
+          >
+            <div
+              class="rounded-lg border border-slate-300 bg-white p-3 shadow-sm"
+            >
+              <p
+                class="text-xs font-semibold uppercase tracking-wide text-slate-600"
+              >
+                Limitations
+              </p>
+              <p class="mt-1 text-xs text-slate-700">
+                Data Quality: Relies on OSM completeness; protected areas may be
+                underrepresented.
+              </p>
+            </div>
+          </footer>
         </div>
       </aside>
 
