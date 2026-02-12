@@ -16,6 +16,26 @@ const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 const isNetworkFailure = (error) =>
   error instanceof TypeError ||
   /networkerror|failed to fetch/i.test(String(error?.message ?? ""));
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const waitForBackendWakeup = async (timeoutMs = 70000, intervalMs = 3000) => {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const healthResponse = await fetch(HEALTH_ENDPOINT, {
+        method: "GET",
+        cache: "no-store",
+      });
+      if (healthResponse.ok) {
+        return true;
+      }
+    } catch {
+      // keep polling while backend wakes up
+    }
+    await sleep(intervalMs);
+  }
+  return false;
+};
 
 export function useAnalysis() {
   const bufferDistance = ref(500);
@@ -37,7 +57,7 @@ export function useAnalysis() {
       max_grid_distance: clamp(Number(maxGridDistance.value), 100, 10000),
     };
 
-    try {
+    const requestAnalyze = async () => {
       if (DEBUG_ANALYSIS) {
         console.info("[analysis] request:start", {
           endpoint: ANALYZE_ENDPOINT,
@@ -62,26 +82,60 @@ export function useAnalysis() {
       }
 
       const responseData = await response.json().catch(() => ({}));
-      if (!response.ok) {
+      return { response, responseData };
+    };
+
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const { response, responseData } = await requestAnalyze();
+
+        if (response.ok) {
+          if (
+            responseData.type !== "FeatureCollection" ||
+            !Array.isArray(responseData.features)
+          ) {
+            throw new Error("API returned an invalid GeoJSON response.");
+          }
+
+          if (DEBUG_ANALYSIS) {
+            console.info("[analysis] request:success", {
+              featureCount: responseData.features.length,
+              attempt: attempt + 1,
+            });
+          }
+
+          return responseData;
+        }
+
+        if (attempt === 0 && response.status === 503) {
+          errorMessage.value = "Backend is waking up. Retrying automatically...";
+          const ready = await waitForBackendWakeup();
+          if (ready) {
+            if (DEBUG_ANALYSIS) {
+              console.info("[analysis] backend woke up, retrying analyze");
+            }
+            continue;
+          }
+        }
+
         throw new Error(responseData.detail || "Analysis request failed.");
       }
 
-      if (
-        responseData.type !== "FeatureCollection" ||
-        !Array.isArray(responseData.features)
-      ) {
-        throw new Error("API returned an invalid GeoJSON response.");
-      }
-
-      if (DEBUG_ANALYSIS) {
-        console.info("[analysis] request:success", {
-          featureCount: responseData.features.length,
-        });
-      }
-
-      return responseData;
+      throw new Error("Analysis request failed after retry.");
     } catch (error) {
       if (isNetworkFailure(error)) {
+        const ready = await waitForBackendWakeup(45000, 3000);
+        if (ready) {
+          try {
+            const { response, responseData } = await requestAnalyze();
+            if (response.ok) {
+              return responseData;
+            }
+          } catch {
+            // fall through to user-facing message
+          }
+        }
+
         let healthStatus = "unreachable";
         try {
           const healthResponse = await fetch(HEALTH_ENDPOINT, { method: "GET" });
@@ -90,7 +144,7 @@ export function useAnalysis() {
           healthStatus = "unreachable";
         }
 
-        errorMessage.value = `NetworkError: API nicht erreichbar (${ANALYZE_ENDPOINT}). Health-Check: ${healthStatus}. Prüfe, ob FastAPI lokal auf Port 8000 läuft.`;
+        errorMessage.value = `NetworkError: API not reachable (${ANALYZE_ENDPOINT}). Health: ${healthStatus}.`;
       } else {
         errorMessage.value =
           error instanceof Error ? error.message : "Unexpected analysis error.";

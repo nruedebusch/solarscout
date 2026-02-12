@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -17,6 +18,13 @@ class DatabaseQueryError(Exception):
 
 
 logger = logging.getLogger(__name__)
+TRANSIENT_CONNECTION_SQLSTATE_PREFIXES = ("08", "57")
+TRANSIENT_CONNECTION_MESSAGES = (
+    "connection was closed",
+    "connection is closed",
+    "terminating connection",
+    "connection reset",
+)
 
 
 class Database:
@@ -31,6 +39,7 @@ class Database:
     async def connect(self) -> None:
         if self._pool is not None:
             return
+
         try:
             self._pool = await asyncpg.create_pool(
                 dsn=self._database_url,
@@ -73,6 +82,13 @@ class Database:
         except Exception as exc:
             raise DatabaseConnectionError("Database connectivity check failed.") from exc
         return value == 1
+
+    def _is_transient_connection_error(self, exc: Exception) -> bool:
+        sqlstate = str(getattr(exc, "sqlstate", ""))
+        raw_message = " ".join(str(exc).splitlines()).strip().lower()
+        return sqlstate.startswith(TRANSIENT_CONNECTION_SQLSTATE_PREFIXES) or any(
+            token in raw_message for token in TRANSIENT_CONNECTION_MESSAGES
+        )
 
     def _require_pool(self) -> Pool:
         if self._pool is None:
@@ -175,8 +191,9 @@ class Database:
 
         rows: list[asyncpg.Record] | None = None
         last_exc: Exception | None = None
+        max_attempts = 3
 
-        for attempt in range(2):
+        for attempt in range(max_attempts):
             try:
                 rows = await pool.fetch(sql, *query_args)
                 last_exc = None
@@ -184,20 +201,17 @@ class Database:
             except (asyncpg.PostgresError, asyncpg.InterfaceError) as exc:
                 last_exc = exc
                 sqlstate = str(getattr(exc, "sqlstate", "unknown"))
-                raw_message = " ".join(str(exc).splitlines()).strip()
-
-                if attempt == 0 and (
-                    sqlstate.startswith("08")
-                    or "connection was closed" in raw_message.lower()
-                    or "connection is closed" in raw_message.lower()
-                ):
+                if attempt < max_attempts - 1 and self._is_transient_connection_error(exc):
                     logger.warning(
-                        "Database connection dropped during analysis (sqlstate=%s). Reconnecting and retrying once.",
+                        "Database connection dropped during analysis (sqlstate=%s). Reconnecting and retrying (attempt %s/%s).",
                         sqlstate,
+                        attempt + 2,
+                        max_attempts,
                     )
                     await self._reconnect()
                     pool = self._require_pool()
                     await self._ensure_analysis_tables(pool)
+                    await asyncio.sleep(0.25 * (attempt + 1))
                     continue
 
                 break
@@ -211,10 +225,10 @@ class Database:
             raw_message = " ".join(str(exc).splitlines()).strip()
             logger.exception("Spatial analysis query failed (sqlstate=%s): %s", sqlstate, raw_message)
 
-            if str(sqlstate).startswith("08"):
+            if self._is_transient_connection_error(exc):
                 raise DatabaseConnectionError(
-                    "Database connection dropped during analysis. Please retry. "
-                    "If this keeps happening on Render, ensure the backend uses the Internal Database URL."
+                    "Database connection dropped during analysis. Please retry in a few seconds. "
+                    "If this persists on Render, check service/database region and DATABASE_URL."
                 ) from exc
 
             if sqlstate == "42P01":
