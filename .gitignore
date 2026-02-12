@@ -7,10 +7,12 @@ Thumbs.db
 # Root env files
 .env
 .env.*
+!.env.example
 
 # Backend (Python)
 backend/.env
 backend/.env.*
+!backend/.env.example
 backend/.venv/
 backend/venv/
 backend/__pycache__/
@@ -23,6 +25,7 @@ backend/**/*.pyd
 # Frontend (Vue / Vite)
 frontend/.env
 frontend/.env.*
+!frontend/.env.example
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/

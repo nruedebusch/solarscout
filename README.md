@@ -40,3 +40,32 @@ SolarScout is a geospatial analysis application that identifies and evaluates po
    - `suitable_area_ha`: Post-exclusion usable area
    - `grid_distance_m`: Distance to nearest power infrastructure
    - `score`: Composite ranking metric
+
+## Deploy on Render
+
+This repository now includes `render.yaml` so Render can create all required services:
+
+- `solarscout-api` (FastAPI backend)
+- `solarscout-frontend` (Vite static frontend)
+- `solarscout-db` (PostgreSQL database)
+
+### One-time setup
+
+1. Push the latest code to GitHub.
+2. In Render, choose **New +** -> **Blueprint**.
+3. Select this repository and deploy.
+
+### After services are created
+
+1. Open `solarscout-frontend` in Render.
+2. Set environment variable:
+   - `VITE_API_BASE_URL=https://<your-backend-service>.onrender.com`
+3. Open `solarscout-api` in Render.
+4. Set environment variable:
+   - `CORS_ORIGINS=https://<your-frontend-service>.onrender.com`
+5. Redeploy frontend and backend.
+
+### Data import note
+
+Render deploys the app infrastructure, but OSM data still needs to be imported into the Render Postgres database.
+Use your existing `osm2pgsql` import workflow against the Render DB connection string, then run `prepare_data.sql`.
