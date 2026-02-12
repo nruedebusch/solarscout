@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ssl
 import json
 import logging
 from typing import Any
@@ -39,6 +40,11 @@ class Database:
     async def connect(self) -> None:
         if self._pool is not None:
             return
+        
+            import ssl
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
 
         try:
             self._pool = await asyncpg.create_pool(
