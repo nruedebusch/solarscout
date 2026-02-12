@@ -40,7 +40,10 @@ class Database:
                 max_inactive_connection_lifetime=300,
             )
         except Exception as exc:
-            raise DatabaseConnectionError("Unable to connect to PostgreSQL.") from exc
+            raise DatabaseConnectionError(
+                "Unable to connect to PostgreSQL. Check DATABASE_URL. "
+                "On Render: prefer the Internal Database URL; if you use the External URL, ensure it has ?sslmode=require."
+            ) from exc
 
     async def ensure_connected(self) -> None:
         if self._pool is None:

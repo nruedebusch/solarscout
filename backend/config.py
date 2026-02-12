@@ -1,6 +1,7 @@
 from functools import lru_cache
 import json
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -15,6 +16,31 @@ class Settings(BaseSettings):
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     ]
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def normalize_database_url(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+
+        raw_value = value.strip()
+        if not raw_value:
+            return value
+
+        parsed = urlparse(raw_value)
+        if parsed.scheme not in {"postgres", "postgresql"}:
+            return value
+
+        hostname = (parsed.hostname or "").lower()
+        if not hostname.endswith("render.com"):
+            return value
+
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        if "sslmode" not in query:
+            query["sslmode"] = "require"
+            return urlunparse(parsed._replace(query=urlencode(query)))
+
+        return value
 
     @field_validator("cors_origins", mode="before")
     @classmethod
