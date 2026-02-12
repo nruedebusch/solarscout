@@ -48,10 +48,10 @@ class Database:
         try:
             self._pool = await asyncpg.create_pool(
                 dsn=self._database_url,
-                min_size=1,
+                min_size=0,
                 max_size=5,
                 command_timeout=180,
-                max_inactive_connection_lifetime=300,
+                max_inactive_connection_lifetime=10,
             )
         except Exception as exc:
             raise DatabaseConnectionError(
@@ -62,13 +62,8 @@ class Database:
     async def ensure_connected(self) -> None:
         if self._pool is None:
             await self.connect()
-            return
 
-        # Render may drop idle connections; validate the pool and reconnect on failure.
-        try:
-            await self._pool.fetchval("SELECT 1;")
-        except Exception:
-            await self._reconnect()
+
 
     async def disconnect(self) -> None:
         if self._pool is None:
