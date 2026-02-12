@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import asyncpg
@@ -13,6 +14,9 @@ class DatabaseConnectionError(Exception):
 
 class DatabaseQueryError(Exception):
     pass
+
+
+logger = logging.getLogger(__name__)
 
 
 class Database:
@@ -69,23 +73,32 @@ class Database:
         max_grid_distance: int,
     ) -> dict[str, Any]:
         pool = self._require_pool()
+        await self._ensure_analysis_tables(pool)
+
         sql = """
             WITH parcels AS (
                 SELECT
                     ROW_NUMBER() OVER (ORDER BY area_ha DESC, landuse) AS id,
                     area_ha,
                     landuse,
-                    geom
+                    ST_Multi(
+                        ST_CollectionExtract(
+                            ST_MakeValid(geom),
+                            3
+                        )
+                    )::geometry(MultiPolygon, 25832) AS geom
                 FROM candidate_parcels
                 WHERE area_ha >= $1
+                  AND geom IS NOT NULL
+                  AND NOT ST_IsEmpty(geom)
             ),
             exclusions AS (
                 SELECT
                     ST_UnaryUnion(
                         ST_Collect(
                             CASE
-                                WHEN category = 'residential' THEN ST_Buffer(geom, $2)
-                                WHEN $3 AND category IN ('woodland', 'park', 'water', 'nature_reserve', 'protected_area') THEN geom
+                                WHEN category = 'residential' THEN ST_Buffer(ST_MakeValid(geom), $2)
+                                WHEN $3 AND category IN ('woodland', 'park', 'water', 'nature_reserve', 'protected_area') THEN ST_MakeValid(geom)
                                 ELSE NULL
                             END
                         )
@@ -101,7 +114,7 @@ class Database:
                     p.landuse,
                     CASE
                         WHEN e.geom IS NULL THEN p.geom
-                        ELSE ST_Difference(p.geom, e.geom)
+                        ELSE ST_Difference(ST_MakeValid(p.geom), ST_MakeValid(e.geom))
                     END AS geom
                 FROM parcels p
                 CROSS JOIN exclusions e
@@ -151,7 +164,34 @@ class Database:
                 max_grid_distance,
             )
         except asyncpg.PostgresError as exc:
-            raise DatabaseQueryError("Spatial analysis query failed.") from exc
+            sqlstate = getattr(exc, "sqlstate", "unknown")
+            raw_message = " ".join(str(exc).splitlines()).strip()
+            logger.exception("Spatial analysis query failed (sqlstate=%s): %s", sqlstate, raw_message)
+
+            if sqlstate == "42P01":
+                raise DatabaseQueryError(
+                    "Spatial analysis query failed: required ARD tables are missing. "
+                    "Run prepare_data.sql in the target database."
+                ) from exc
+            if sqlstate == "42883":
+                raise DatabaseQueryError(
+                    "Spatial analysis query failed: PostGIS functions are unavailable. "
+                    "Enable extension with CREATE EXTENSION postgis;"
+                ) from exc
+            if "mixed SRID" in raw_message:
+                raise DatabaseQueryError(
+                    "Spatial analysis query failed: mixed SRID geometries detected. "
+                    "Rebuild ARD tables using prepare_data.sql so all tables use EPSG:25832."
+                ) from exc
+            if "TopologyException" in raw_message:
+                raise DatabaseQueryError(
+                    "Spatial analysis query failed: invalid topology in source geometries. "
+                    "Re-run prepare_data.sql and retry."
+                ) from exc
+
+            raise DatabaseQueryError(
+                f"Spatial analysis query failed (sqlstate {sqlstate}): {raw_message}"
+            ) from exc
         except Exception as exc:
             raise DatabaseConnectionError("Database request failed.") from exc
 
@@ -170,3 +210,26 @@ class Database:
             )
 
         return {"type": "FeatureCollection", "features": features}
+
+    async def _ensure_analysis_tables(self, pool: Pool) -> None:
+        missing_tables = await pool.fetch(
+            """
+            WITH required(table_name) AS (
+                VALUES
+                    ('candidate_parcels'),
+                    ('exclusion_zones'),
+                    ('grid_infrastructure')
+            )
+            SELECT table_name
+            FROM required
+            WHERE to_regclass('public.' || table_name) IS NULL
+            ORDER BY table_name;
+            """
+        )
+
+        if missing_tables:
+            names = ", ".join(row["table_name"] for row in missing_tables)
+            raise DatabaseQueryError(
+                "Spatial analysis query failed: required ARD tables are missing "
+                f"({names}). Run prepare_data.sql in the target database."
+            )
