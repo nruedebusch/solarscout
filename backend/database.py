@@ -35,8 +35,9 @@ class Database:
             self._pool = await asyncpg.create_pool(
                 dsn=self._database_url,
                 min_size=1,
-                max_size=10,
-                command_timeout=60,
+                max_size=5,
+                command_timeout=180,
+                max_inactive_connection_lifetime=300,
             )
         except Exception as exc:
             raise DatabaseConnectionError("Unable to connect to PostgreSQL.") from exc
@@ -44,12 +45,23 @@ class Database:
     async def ensure_connected(self) -> None:
         if self._pool is None:
             await self.connect()
+            return
+
+        # Render may drop idle connections; validate the pool and reconnect on failure.
+        try:
+            await self._pool.fetchval("SELECT 1;")
+        except Exception:
+            await self._reconnect()
 
     async def disconnect(self) -> None:
         if self._pool is None:
             return
         await self._pool.close()
         self._pool = None
+
+    async def _reconnect(self) -> None:
+        await self.disconnect()
+        await self.connect()
 
     async def ping(self) -> bool:
         pool = self._require_pool()
@@ -81,12 +93,7 @@ class Database:
                     ROW_NUMBER() OVER (ORDER BY area_ha DESC, landuse) AS id,
                     area_ha,
                     landuse,
-                    ST_Multi(
-                        ST_CollectionExtract(
-                            ST_MakeValid(geom),
-                            3
-                        )
-                    )::geometry(MultiPolygon, 25832) AS geom
+                    geom
                 FROM candidate_parcels
                 WHERE area_ha >= $1
                   AND geom IS NOT NULL
@@ -97,15 +104,15 @@ class Database:
                     ST_UnaryUnion(
                         ST_Collect(
                             CASE
-                                WHEN category = 'residential' THEN ST_Buffer(ST_MakeValid(geom), $2)
-                                WHEN $3 AND category IN ('woodland', 'park', 'water', 'nature_reserve', 'protected_area') THEN ST_MakeValid(geom)
+                                WHEN category = 'residential' THEN ST_Buffer(geom, $2)
+                                WHEN $3 AND category IN ('woodland', 'park', 'water', 'nature_reserve') THEN geom
                                 ELSE NULL
                             END
                         )
                     ) AS geom
                 FROM exclusion_zones
                 WHERE category = 'residential'
-                   OR ($3 AND category IN ('woodland', 'park', 'water', 'nature_reserve', 'protected_area'))
+                   OR ($3 AND category IN ('woodland', 'park', 'water', 'nature_reserve'))
             ),
             parcels_cut AS (
                 SELECT
@@ -114,7 +121,8 @@ class Database:
                     p.landuse,
                     CASE
                         WHEN e.geom IS NULL THEN p.geom
-                        ELSE ST_Difference(ST_MakeValid(p.geom), ST_MakeValid(e.geom))
+                        WHEN NOT ST_Intersects(p.geom, e.geom) THEN p.geom
+                        ELSE ST_Difference(p.geom, e.geom)
                     END AS geom
                 FROM parcels p
                 CROSS JOIN exclusions e
@@ -155,18 +163,56 @@ class Database:
             WHERE NOT ST_IsEmpty(geom);
         """
 
-        try:
-            rows = await pool.fetch(
-                sql,
-                min_area,
-                buffer_distance,
-                exclude_nature,
-                max_grid_distance,
-            )
-        except asyncpg.PostgresError as exc:
+        query_args = (
+            min_area,
+            buffer_distance,
+            exclude_nature,
+            max_grid_distance,
+        )
+
+        rows: list[asyncpg.Record] | None = None
+        last_exc: Exception | None = None
+
+        for attempt in range(2):
+            try:
+                rows = await pool.fetch(sql, *query_args)
+                last_exc = None
+                break
+            except (asyncpg.PostgresError, asyncpg.InterfaceError) as exc:
+                last_exc = exc
+                sqlstate = str(getattr(exc, "sqlstate", "unknown"))
+                raw_message = " ".join(str(exc).splitlines()).strip()
+
+                if attempt == 0 and (
+                    sqlstate.startswith("08")
+                    or "connection was closed" in raw_message.lower()
+                    or "connection is closed" in raw_message.lower()
+                ):
+                    logger.warning(
+                        "Database connection dropped during analysis (sqlstate=%s). Reconnecting and retrying once.",
+                        sqlstate,
+                    )
+                    await self._reconnect()
+                    pool = self._require_pool()
+                    await self._ensure_analysis_tables(pool)
+                    continue
+
+                break
+            except Exception as exc:
+                last_exc = exc
+                break
+
+        if last_exc is not None or rows is None:
+            exc = last_exc or Exception("Unknown database failure.")
             sqlstate = getattr(exc, "sqlstate", "unknown")
             raw_message = " ".join(str(exc).splitlines()).strip()
             logger.exception("Spatial analysis query failed (sqlstate=%s): %s", sqlstate, raw_message)
+
+            if str(sqlstate).startswith("08"):
+                raise DatabaseConnectionError(
+                    "Database connection dropped during analysis. Please retry. "
+                    "If this keeps happening on Render, ensure the backend uses the Internal Database URL."
+                ) from exc
 
             if sqlstate == "42P01":
                 raise DatabaseQueryError(
@@ -192,8 +238,6 @@ class Database:
             raise DatabaseQueryError(
                 f"Spatial analysis query failed (sqlstate {sqlstate}): {raw_message}"
             ) from exc
-        except Exception as exc:
-            raise DatabaseConnectionError("Database request failed.") from exc
 
         features: list[dict[str, Any]] = []
         for row in rows:
